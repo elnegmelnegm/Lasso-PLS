@@ -69,9 +69,6 @@ if uploaded_file is not None:
     st.write("Selected Features (Indices) using Elastic Net:", best_features_en)
     st.write(f"Number of Selected Features: {len(best_features_en)}")
     st.write("Best Elastic Net Model:", best_en_model)
-    st.write("Best Elastic Net Model Coefficients:", best_en_model.coef_)
-    st.write(f"Best alpha value: {best_alpha}")
-    st.write(f"Best l1_ratio value: {best_l1_ratio}")
     st.write(f"Feature selection with Elastic Net took {end_time - start_time:.2f} seconds")
 
     # --- 2. Build and Evaluate PLS Model ---
