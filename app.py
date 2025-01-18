@@ -126,7 +126,7 @@ if uploaded_file is not None:
         X_train_selected = X_train_scaled[:, best_features_rf]
         X_test_selected = X_test_scaled[:, best_features_rf]
 
-        best_n_components_with_fs = optimize_pls_components(X_train_selected, y_train, max_components=4)
+        best_n_components_with_fs = optimize_pls_components(X_train_selected, y_train, max_components=10)
         st.write(f"Best number of components for PLS with feature selection: {best_n_components_with_fs}")
 
         # With Feature Selection
