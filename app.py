@@ -1,82 +1,144 @@
-import streamlit as st
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import Lasso
+from sklearn.model_selection import train_test_split, GridSearchCV, KFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.cross_decomposition import PLSRegression
-import joblib
+from scipy.stats import ttest_rel
+import time
+import streamlit as st
 
-# Load trained models (assuming they are in the same directory or a 'models' subdirectory)
-try:
-    lasso_model = joblib.load('lasso_model.joblib')
-    pls_model_with_fs = joblib.load('pls_with_fs_model.joblib')
-    pls_model_without_fs = joblib.load('pls_without_fs_model.joblib')
-except FileNotFoundError:
-    st.error("Model files not found. Please make sure the models are trained and saved correctly.")
-    lasso_model = None
-    pls_model_with_fs = None
-    pls_model_without_fs = None
+# Load and Prepare Data
+data = pd.read_csv('spectral_data.csv')
+X = data.iloc[:, 1:]  # Spectral data
+y = data.iloc[:, 0:1]  # Concentrations of drugs A, B, and C
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Function to preprocess data
-def preprocess_data(df):
-    X = df.iloc[:, 1:]  # Assuming spectral data starts from column 3
-    y = df.iloc[:, 0:1]  # Assuming concentrations are in the first 3 columns
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    return X_scaled, y
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-# Function to perform feature selection using the loaded Lasso model
-def select_features_with_lasso(X_scaled, lasso_model):
-    selected_features = np.where(lasso_model.coef_ != 0)[0]
-    return X_scaled[:, selected_features]
+# --- 1. Feature Selection using Lasso (L1 Regularization) ---
 
-# Streamlit app
-st.title("Spectral Data Analysis with PLS")
+# Function to select features based on the best Lasso model
+def select_features_with_lasso(X_train_scaled, y_train, param_grid):
+    # Create and fit the Lasso model
+    model = Lasso(max_iter=10000, tol=1e-3)
 
-# File uploader
-uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
+    # Perform Grid Search to find the best hyperparameters
+    grid_search = GridSearchCV(model, param_grid, cv=5, scoring='neg_mean_squared_error', n_jobs=-1)
+    grid_search.fit(X_train_scaled, y_train)
 
-if uploaded_file is not None:
-    # Read the uploaded file into a pandas DataFrame
-    df = pd.read_csv(uploaded_file)
+    # Get the best model
+    best_model = grid_search.best_estimator_
 
-    # Display the first few rows of the DataFrame
-    st.write("### First few rows of the uploaded data:")
-    st.write(df.head())
+    # Select features based on non-zero coefficients
+    best_features = np.where(best_model.coef_ != 0)[0]
 
-    # Preprocess the data
-    X_scaled, y = preprocess_data(df)
+    return best_features, best_model
 
-    # Feature selection (if Lasso model is loaded)
-    if lasso_model is not None:
-        X_selected = select_features_with_lasso(X_scaled, lasso_model)
-        st.write(f"Number of features selected by Lasso: {X_selected.shape[1]}")
-    else:
-        X_selected = X_scaled  # Use all features if no model is loaded
-        st.write("Lasso model not loaded. Using all features.")
+# Define the parameter grid for GridSearchCV (focus on Lasso)
+param_grid_lasso = {
+    'alpha': [1e-5, 1e-4, 1e-3, 1e-2, 0.1, 0.5, 1.0, 5.0, 10.0]  # Wider range, including very small values
+}
 
-    # PLS without feature selection
-    if pls_model_without_fs is not None:
-        y_pred_without_fs = pls_model_without_fs.predict(X_scaled)
-        mse_without_fs = mean_squared_error(y, y_pred_without_fs)
-        mae_without_fs = mean_absolute_error(y, y_pred_without_fs)
-        r2_without_fs = r2_score(y, y_pred_without_fs)
+# Select features using Lasso with Grid Search
+start_time = time.time()
+best_features_lasso, best_lasso_model = select_features_with_lasso(X_train_scaled, y_train, param_grid_lasso)
+end_time = time.time()
 
-        st.write("### PLS without Feature Selection:")
-        st.write("  MSE:", mse_without_fs)
-        st.write("  MAE:", mae_without_fs)
-        st.write("  R-squared:", r2_without_fs)
+print("Selected Features (Indices) using Lasso:", best_features_lasso)
+print("Best Lasso Model:", best_lasso_model)
+print("Best Lasso Model Coefficients:", best_lasso_model.coef_)
+print(f"Feature selection with Lasso took {end_time - start_time:.2f} seconds")
 
-    # PLS with feature selection
-    if pls_model_with_fs is not None and X_selected.shape[1] > 0:
-        y_pred_with_fs = pls_model_with_fs.predict(X_selected)
-        mse_with_fs = mean_squared_error(y, y_pred_with_fs)
-        mae_with_fs = mean_absolute_error(y, y_pred_with_fs)
-        r2_with_fs = r2_score(y, y_pred_with_fs)
+# --- 2. Build and Evaluate PLS Model ---
 
-        st.write("### PLS with Feature Selection:")
-        st.write("  MSE:", mse_with_fs)
-        st.write("  MAE:", mae_with_fs)
-        st.write("  R-squared:", r2_with_fs)
-    else:
-        st.write("PLS with feature selection not available (no features selected or model not loaded).")
+# Function to optimize the number of components for PLS using cross-validation
+def optimize_pls_components(X, y, max_components=10, n_splits=5):
+    best_n_components = 1
+    best_cv_score = -np.inf
+
+    for n_components in range(1, max_components + 1):
+        pls = PLSRegression(n_components=n_components)
+        cv_scores = cross_val_score(pls, X, y, cv=n_splits, scoring='neg_mean_squared_error')
+        mean_cv_score = np.mean(cv_scores)
+
+        if mean_cv_score > best_cv_score:
+            best_cv_score = mean_cv_score
+            best_n_components = n_components
+
+    return best_n_components
+
+# Optimize n_components for PLS without feature selection
+best_n_components_without_fs = optimize_pls_components(X_train_scaled, y_train)
+print(f"\nBest number of components for PLS without feature selection: {best_n_components_without_fs}")
+
+# Without Feature Selection
+pls_without_fs = PLSRegression(n_components=best_n_components_without_fs)
+pls_without_fs.fit(X_train_scaled, y_train)
+
+# Predictions on training and testing sets
+y_train_pred_without_fs = pls_without_fs.predict(X_train_scaled)
+y_test_pred_without_fs = pls_without_fs.predict(X_test_scaled)
+
+# Calculate metrics for training set
+mse_train_without_fs = mean_squared_error(y_train, y_train_pred_without_fs)
+mae_train_without_fs = mean_absolute_error(y_train, y_train_pred_without_fs)
+r2_train_without_fs = r2_score(y_train, y_train_pred_without_fs)
+
+# Calculate metrics for testing set
+mse_test_without_fs = mean_squared_error(y_test, y_test_pred_without_fs)
+mae_test_without_fs = mean_absolute_error(y_test, y_test_pred_without_fs)
+r2_test_without_fs = r2_score(y_test, y_test_pred_without_fs)
+
+print("PLS without Feature Selection (Training Set):")
+print("  MSE:", mse_train_without_fs)
+print("  MAE:", mae_train_without_fs)
+print("  R-squared:", r2_train_without_fs)
+
+print("PLS without Feature Selection (Testing Set):")
+print("  MSE:", mse_test_without_fs)
+print("  MAE:", mae_test_without_fs)
+print("  R-squared:", r2_test_without_fs)
+
+# Optimize n_components for PLS with feature selection (if features were selected)
+if best_features_lasso.size > 0:
+    X_train_selected = X_train_scaled[:, best_features_lasso]
+    X_test_selected = X_test_scaled[:, best_features_lasso]
+
+    best_n_components_with_fs = optimize_pls_components(X_train_selected, y_train, max_components=4)
+    print(f"Best number of components for PLS with feature selection: {best_n_components_with_fs}")
+
+    # With Feature Selection
+    pls_with_fs = PLSRegression(n_components=best_n_components_with_fs)
+    pls_with_fs.fit(X_train_selected, y_train)
+
+    # Predictions on training and testing sets
+    y_train_pred_with_fs = pls_with_fs.predict(X_train_selected)
+    y_test_pred_with_fs = pls_with_fs.predict(X_test_selected)
+
+    # Calculate metrics for training set
+    mse_train_with_fs = mean_squared_error(y_train, y_train_pred_with_fs)
+    mae_train_with_fs = mean_absolute_error(y_train, y_train_pred_with_fs)
+    r2_train_with_fs = r2_score(y_train, y_train_pred_with_fs)
+
+    # Calculate metrics for testing set
+    mse_test_with_fs = mean_squared_error(y_test, y_test_pred_with_fs)
+    mae_test_with_fs = mean_absolute_error(y_test, y_test_pred_with_fs)
+    r2_test_with_fs = r2_score(y_test, y_test_pred_with_fs)
+
+    print("PLS with Feature Selection (Training Set):")
+    print("  MSE:", mse_train_with_fs)
+    print("  MAE:", mae_train_with_fs)
+    print("  R-squared:", r2_train_with_fs)
+
+    print("PLS with Feature Selection (Testing Set):")
+    print("  MSE:", mse_test_with_fs)
+    print("  MAE:", mae_test_with_fs)
+    print("  R-squared:", r2_test_with_fs)
+
+
+
+   
