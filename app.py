@@ -1,18 +1,20 @@
-import streamlit as st
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import ElasticNet
 from sklearn.model_selection import train_test_split, GridSearchCV, KFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.feature_selection import SelectFromModel
 from scipy.stats import ttest_rel
 import time
+import streamlit as st
 
-# Function to select features based on Random Forest feature importance
-def select_features_with_random_forest(X_train_scaled, y_train, param_grid, threshold="median"):
-    model = RandomForestRegressor(random_state=42)
+# --- Feature Selection using Elastic Net with Hyperparameter Tuning ---
+
+# Function to select features based on the best Elastic Net model
+def select_features_with_elastic_net(X_train_scaled, y_train, param_grid):
+    # Create and fit the Elastic Net model
+    model = ElasticNet(max_iter=10000, tol=1e-3)
 
     # Perform Grid Search to find the best hyperparameters
     grid_search = GridSearchCV(model, param_grid, cv=5, scoring='neg_mean_squared_error', n_jobs=-1)
@@ -21,28 +23,20 @@ def select_features_with_random_forest(X_train_scaled, y_train, param_grid, thre
     # Get the best model
     best_model = grid_search.best_estimator_
 
-    # Select features based on importance
-    selector = SelectFromModel(best_model, threshold=threshold)
-    selector.fit(X_train_scaled, y_train)
-    selected_features = np.where(selector.get_support())[0]
+    # Select features based on non-zero coefficients
+    best_features = np.where(best_model.coef_ != 0)[0]
 
-    return selected_features, selector, best_model
+    # Get the best hyperparameters
+    best_alpha = best_model.alpha
+    best_l1_ratio = best_model.l1_ratio
 
-# Function to optimize the number of components for PLS using cross-validation
-def optimize_pls_components(X, y, max_components=10, n_splits=5):
-    best_n_components = 1
-    best_cv_score = -np.inf
+    return best_features, best_model, best_alpha, best_l1_ratio
 
-    for n_components in range(1, max_components + 1):
-        pls = PLSRegression(n_components=n_components)
-        cv_scores = cross_val_score(pls, X, y, cv=n_splits, scoring='neg_mean_squared_error')
-        mean_cv_score = np.mean(cv_scores)
-
-        if mean_cv_score > best_cv_score:
-            best_cv_score = mean_cv_score
-            best_n_components = n_components
-
-    return best_n_components
+# Define the parameter grid for GridSearchCV (focus on Elastic Net)
+param_grid_elastic_net = {
+    'alpha': [1e-5, 1e-4, 1e-3, 1e-2, 0.1, 0.5, 1.0, 5.0, 10.0],
+    'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9]  # Range of l1_ratio values
+}
 
 # Streamlit app
 st.title("Spectral Data Analysis with PLS")
@@ -67,31 +61,39 @@ if uploaded_file is not None:
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # --- 1. Feature Selection using Random Forest with Hyperparameter Tuning ---
-
-    # Define the parameter grid for GridSearchCV (Random Forest)
-    param_grid_rf = {
-        'n_estimators': [50, 100, 200],
-        'max_depth': [None, 5, 10, 15],
-        'min_samples_split': [2, 5, 10],
-        'min_samples_leaf': [1, 2, 4]
-    }
-
-    # Select features using Random Forest with Grid Search
+    # Select features using Elastic Net with Grid Search
     start_time = time.time()
-    best_features_rf, rf_selector, best_rf_model = select_features_with_random_forest(X_train_scaled, y_train, param_grid_rf)
+    best_features_en, best_en_model, best_alpha, best_l1_ratio = select_features_with_elastic_net(X_train_scaled, y_train, param_grid_elastic_net)
     end_time = time.time()
 
-    st.write("Selected Features (Indices) using Random Forest:", best_features_rf)
-    st.write(f"Number of Selected Features: {len(best_features_rf)}")
-    st.write("Best Random Forest Model:", best_rf_model)
-    st.write(f"Feature selection with Random Forest took {end_time - start_time:.2f} seconds")
+    st.write("Selected Features (Indices) using Elastic Net:", best_features_en)
+    st.write(f"Number of Selected Features: {len(best_features_en)}")
+    st.write("Best Elastic Net Model:", best_en_model)
+    st.write("Best Elastic Net Model Coefficients:", best_en_model.coef_)
+    st.write(f"Best alpha value: {best_alpha}")
+    st.write(f"Best l1_ratio value: {best_l1_ratio}")
+    st.write(f"Feature selection with Elastic Net took {end_time - start_time:.2f} seconds")
 
     # --- 2. Build and Evaluate PLS Model ---
 
+    # Function to optimize the number of components for PLS using cross-validation
+    def optimize_pls_components(X, y, max_components=10, n_splits=5):
+        best_n_components = 1
+        best_cv_score = -np.inf
+
+        for n_components in range(1, max_components + 1):
+            pls = PLSRegression(n_components=n_components)
+            cv_scores = cross_val_score(pls, X, y, cv=n_splits, scoring='neg_mean_squared_error')
+            mean_cv_score = np.mean(cv_scores)
+
+            if mean_cv_score > best_cv_score:
+                best_cv_score = mean_cv_score
+                best_n_components = n_components
+
+        return best_n_components
+
     # Optimize n_components for PLS without feature selection
-    best_n_components_without_fs = optimize_pls_components(X_train_scaled, y_train, max_components=10)
-    st.write(f"\nBest number of components for PLS without feature selection: {best_n_components_without_fs}")
+    best_n_components_without_fs = optimize_pls_components(X_train_scaled, y_train)
 
     # Without Feature Selection
     pls_without_fs = PLSRegression(n_components=best_n_components_without_fs)
@@ -111,23 +113,12 @@ if uploaded_file is not None:
     mae_test_without_fs = mean_absolute_error(y_test, y_test_pred_without_fs)
     r2_test_without_fs = r2_score(y_test, y_test_pred_without_fs)
 
-    st.write("PLS without Feature Selection (Training Set):")
-    st.write("  MSE:", mse_train_without_fs)
-    st.write("  MAE:", mae_train_without_fs)
-    st.write("  R-squared:", r2_train_without_fs)
-
-    st.write("PLS without Feature Selection (Testing Set):")
-    st.write("  MSE:", mse_test_without_fs)
-    st.write("  MAE:", mae_test_without_fs)
-    st.write("  R-squared:", r2_test_without_fs)
-
     # Optimize n_components for PLS with feature selection (if features were selected)
-    if best_features_rf.size > 0:
-        X_train_selected = X_train_scaled[:, best_features_rf]
-        X_test_selected = X_test_scaled[:, best_features_rf]
+    if best_features_en.size > 0:
+        X_train_selected = X_train_scaled[:, best_features_en]
+        X_test_selected = X_test_scaled[:, best_features_en]
 
-        best_n_components_with_fs = optimize_pls_components(X_train_selected, y_train, max_components=10)
-        st.write(f"Best number of components for PLS with feature selection: {best_n_components_with_fs}")
+        best_n_components_with_fs = optimize_pls_components(X_train_selected, y_train, max_components=4)
 
         # With Feature Selection
         pls_with_fs = PLSRegression(n_components=best_n_components_with_fs)
@@ -147,15 +138,36 @@ if uploaded_file is not None:
         mae_test_with_fs = mean_absolute_error(y_test, y_test_pred_with_fs)
         r2_test_with_fs = r2_score(y_test, y_test_pred_with_fs)
 
-        st.write("PLS with Feature Selection (Training Set):")
-        st.write("  MSE:", mse_train_with_fs)
-        st.write("  MAE:", mae_train_with_fs)
-        st.write("  R-squared:", r2_train_with_fs)
+    # --- 3. Display Results in Two Columns ---
 
-        st.write("PLS with Feature Selection (Testing Set):")
-        st.write("  MSE:", mse_test_with_fs)
-        st.write("  MAE:", mae_test_with_fs)
-        st.write("  R-squared:", r2_test_with_fs)
+    col1, col2 = st.columns(2)  # Create two columns
 
-    else:
-        st.write("Warning: No features were selected by Random Forest. Skipping PLS with feature selection.")
+    with col1:
+        st.write("### PLS without Feature Selection")
+        st.write(f"Best number of components: {best_n_components_without_fs}")
+        st.write("**Training Set:**")
+        st.write(f"  MSE: {mse_train_without_fs:.4f}")
+        st.write(f"  MAE: {mae_train_without_fs:.4f}")
+        st.write(f"  R-squared: {r2_train_without_fs:.4f}")
+        st.write("**Testing Set:**")
+        st.write(f"  MSE: {mse_test_without_fs:.4f}")
+        st.write(f"  MAE: {mae_test_without_fs:.4f}")
+        st.write(f"  R-squared: {r2_test_without_fs:.4f}")
+
+    with col2:
+        st.write("### PLS with Feature Selection (Elastic Net)")
+        if best_features_en.size > 0:
+            st.write(f"Best number of components: {best_n_components_with_fs}")
+            st.write("**Training Set:**")
+            st.write(f"  MSE: {mse_train_with_fs:.4f}")
+            st.write(f"  MAE: {mae_train_with_fs:.4f}")
+            st.write(f"  R-squared: {r2_train_with_fs:.4f}")
+            st.write("**Testing Set:**")
+            st.write(f"  MSE: {mse_test_with_fs:.4f}")
+            st.write(f"  MAE: {mae_test_with_fs:.4f}")
+            st.write(f"  R-squared: {r2_test_with_fs:.4f}")
+        else:
+            st.write("Warning: No features were selected by Elastic Net.")
+
+else:
+    st.write("Please upload a CSV file to begin analysis.")
