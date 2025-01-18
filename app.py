@@ -39,7 +39,7 @@ param_grid_elastic_net = {
 }
 
 # Streamlit app
-st.title("Spectral Data Analysis with PLS")
+st.title("Spectral Data Analysis with PLS and Elastic Net for Feature Selection")
 
 # File uploader
 uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
